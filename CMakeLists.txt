@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.22)
+include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+project(QuizBuzzer-ESP32-ESPNow VERSION 1.0.0)
+if(NOT IDF_VERSION_MAJOR EQUAL 6)
+    message(FATAL_ERROR "Este projeto requer ESP-IDF SDK v6.x (validado com v6.0.2).")
+endif()
