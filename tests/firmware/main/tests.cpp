@@ -130,12 +130,16 @@ void test_slave_only_master_confirms_winner_and_led_resets() {
     TEST_ASSERT_FALSE(slave.onMessage(wrong, 4));
     TEST_ASSERT_FALSE(slave.onMessage(control(Command::WINNER, 3, 2), 4));
     TEST_ASSERT_TRUE(slave.onMessage(control(Command::WINNER, 3), 5));
-    led.setMode(LedManager::modeFor(slave.state()), 5);
-    TEST_ASSERT_TRUE(led.level(5)); TEST_ASSERT_FALSE(led.level(5 + WINNER_BLINK_MS));
+    led.setMode(LedManager::modeFor(slave.state(), slave.synchronized()), 5);
+    TEST_ASSERT_TRUE(led.levels(5).button); TEST_ASSERT_TRUE(led.levels(5).external);
+    TEST_ASSERT_FALSE(led.levels(5 + WINNER_BLINK_MS).button);
+    TEST_ASSERT_FALSE(led.levels(5 + WINNER_BLINK_MS).external);
     TEST_ASSERT_TRUE(slave.onMessage(control(Command::RESET_ROUND, 4, 2), 6));
     TEST_ASSERT_EQUAL(SlaveState::READY, slave.state());
-    led.setMode(LedManager::modeFor(slave.state()), 6);
-    TEST_ASSERT_TRUE(led.level(6)); TEST_ASSERT_TRUE(led.level(6 + WINNER_BLINK_MS));
+    led.setMode(LedManager::modeFor(slave.state(), slave.synchronized()), 6);
+    TEST_ASSERT_TRUE(led.levels(6).button); TEST_ASSERT_TRUE(led.levels(6 + WINNER_BLINK_MS).button);
+    TEST_ASSERT_FALSE(led.levels(6).external);
+    TEST_ASSERT_FALSE(led.levels(6 + WINNER_BLINK_MS).external);
 }
 void test_repeated_reset_does_not_rearm_pressed_or_locked_round() {
     FakeRadio radio; SlaveController slave(radio, 1, 1);
@@ -300,6 +304,82 @@ void test_timeout_resync_ack_does_not_rearm_same_round() {
     TEST_ASSERT_EQUAL(Command::ACK, radio.sent.back().command);
     TEST_ASSERT_FALSE(slave.onButton(DECISION_TIMEOUT_MS + 5));
 }
+void test_loser_leds_stay_off_until_new_round() {
+    FakeRadio radio; SlaveController slave(radio, 2, 1); LedManager led;
+    slave.onMessage(control(Command::RESET_ROUND, 1, 1, 2), 0);
+    led.setMode(LedManager::modeFor(slave.state(), slave.synchronized()), 0);
+    TEST_ASSERT_TRUE(led.levels(0).button); TEST_ASSERT_FALSE(led.levels(0).external);
+    auto lock = control(Command::LOCK_ROUND, 2, 1, 2); lock.winnerID = 1;
+    slave.onMessage(lock, 10);
+    led.setMode(LedManager::modeFor(slave.state(), slave.synchronized()), 10);
+    for (uint32_t now = 10; now < 5010; now += 10) {
+        TEST_ASSERT_FALSE(led.levels(now).button); TEST_ASSERT_FALSE(led.levels(now).external);
+    }
+    // RESET atrasado da mesma rodada nao pode fazer a luz de disponibilidade voltar.
+    slave.onMessage(control(Command::RESET_ROUND, 3, 1, 2), 5010);
+    led.setMode(LedManager::modeFor(slave.state(), slave.synchronized()), 5010);
+    TEST_ASSERT_FALSE(led.levels(5010).button);
+    slave.onMessage(control(Command::RESET_ROUND, 4, 2, 2), 5020);
+    led.setMode(LedManager::modeFor(slave.state(), slave.synchronized()), 5020);
+    TEST_ASSERT_TRUE(led.levels(5020).button); TEST_ASSERT_FALSE(led.levels(5020).external);
+}
+void test_winner_leds_share_phase_across_time_wrap() {
+    LedManager led;
+    const uint32_t start = 0xFFFFFFF0U;
+    led.setMode(LedMode::WINNER, start);
+    TEST_ASSERT_TRUE(led.levels(start).button);
+    for (uint32_t delta = 0; delta < 1000; ++delta) {
+        const uint32_t now = start + delta;
+        led.setMode(LedMode::WINNER, now); // Repeticoes nao reiniciam a fase.
+        const auto levels = led.levels(now);
+        TEST_ASSERT_EQUAL(levels.button, levels.external);
+        if (delta == WINNER_BLINK_MS || delta == 3 * WINNER_BLINK_MS)
+            TEST_ASSERT_FALSE(levels.button);
+        if (delta == 2 * WINNER_BLINK_MS) TEST_ASSERT_TRUE(levels.button);
+    }
+}
+void test_master_leds_invert_for_round_and_reset() {
+    FakeRadio radio; MasterController master(radio, 10); LedManager led;
+    master.begin(false);
+    led.setMode(LedManager::modeFor(master.state()), 0);
+    TEST_ASSERT_TRUE(led.levels(0).button); TEST_ASSERT_FALSE(led.levels(0).external);
+    master.newRound();
+    led.setMode(LedManager::modeFor(master.state()), 1);
+    TEST_ASSERT_FALSE(led.levels(1).button); TEST_ASSERT_TRUE(led.levels(1).external);
+    master.onMessage(status(1, 1), 2); master.onMessage(press(1, 2), 3);
+    led.setMode(LedManager::modeFor(master.state()), 3);
+    TEST_ASSERT_TRUE(led.levels(3).button); TEST_ASSERT_FALSE(led.levels(3).external);
+    TEST_ASSERT_TRUE(led.levels(2000).button); TEST_ASSERT_FALSE(led.levels(2000).external);
+    master.newRound();
+    led.setMode(LedManager::modeFor(master.state()), 2001);
+    TEST_ASSERT_FALSE(led.levels(2001).button); TEST_ASSERT_TRUE(led.levels(2001).external);
+}
+void test_connection_indication_and_external_output_on_boot_error() {
+    FakeRadio radio; SlaveController slave(radio, 1, 1); LedManager led;
+    // Hardware em boot pode piscar somente o botao; nunca a fita externa.
+    for (uint32_t now = 0; now < 1000; now += 10) TEST_ASSERT_FALSE(led.levels(now).external);
+    led.setMode(LedManager::modeFor(slave.state(), slave.synchronized()), 0);
+    TEST_ASSERT_FALSE(led.levels(0).button); TEST_ASSERT_FALSE(led.levels(0).external);
+    slave.onMessage(control(Command::RESET_ROUND, 1), 0);
+    slave.onButton(1);
+    led.setMode(LedManager::modeFor(slave.state(), slave.synchronized()), 1);
+    TEST_ASSERT_TRUE(led.levels(1).button); TEST_ASSERT_TRUE(led.levels(500).button);
+    TEST_ASSERT_FALSE(led.levels(1).external);
+    slave.tick(DECISION_TIMEOUT_MS + 2);
+    led.setMode(LedManager::modeFor(slave.state(), slave.synchronized()), DECISION_TIMEOUT_MS + 2);
+    TEST_ASSERT_FALSE(led.levels(DECISION_TIMEOUT_MS + 2).button);
+    TEST_ASSERT_FALSE(led.levels(DECISION_TIMEOUT_MS + 2).external);
+    // Uma vitoria ja confirmada continua sinalizada quando o link cai.
+    led.setMode(LedManager::modeFor(SlaveState::WINNER, false), 3000);
+    TEST_ASSERT_TRUE(led.levels(3000).button); TEST_ASSERT_TRUE(led.levels(3000).external);
+    led.setMode(LedMode::ERROR, 4000);
+    for (uint32_t now = 4000; now < 8000; now += 10) TEST_ASSERT_FALSE(led.levels(now).external);
+    // O diagnostico do botao repete os dois pulsos, sem deslocar a fase entre ciclos.
+    TEST_ASSERT_TRUE(led.levels(4000).button);
+    TEST_ASSERT_TRUE(led.levels(4000 + ERROR_PATTERN_PERIOD_MS).button);
+    TEST_ASSERT_FALSE(led.levels(4000 + ERROR_PATTERN_PERIOD_MS + BOOT_BLINK_MS).button);
+    TEST_ASSERT_TRUE(led.levels(4000 + ERROR_PATTERN_PERIOD_MS + 2 * BOOT_BLINK_MS).button);
+}
 }
 extern "C" void app_main() {
     UNITY_BEGIN();
@@ -319,5 +399,9 @@ extern "C" void app_main() {
     RUN_TEST(test_configuration_table);
     RUN_TEST(test_loss_reordering_and_duplicate_commands_converge);
     RUN_TEST(test_timeout_resync_ack_does_not_rearm_same_round);
+    RUN_TEST(test_loser_leds_stay_off_until_new_round);
+    RUN_TEST(test_winner_leds_share_phase_across_time_wrap);
+    RUN_TEST(test_master_leds_invert_for_round_and_reset);
+    RUN_TEST(test_connection_indication_and_external_output_on_boot_error);
     UNITY_END();
 }

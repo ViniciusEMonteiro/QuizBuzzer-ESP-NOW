@@ -86,6 +86,7 @@ bool EspNowManager::trySend(const QuizMessage& m) {
     if (result != ESP_OK) {
         ++sendErrors_;
         backoff_ = true; lastError_ = now;
+        if (result != ESP_ERR_ESPNOW_NO_MEM) { fault_ = true; faultReason_ = result; }
         return false;
     }
     busy_ = true; sentAt_ = now;
@@ -99,7 +100,9 @@ void EspNowManager::poll(uint32_t now) {
         if (status == ESP_NOW_SEND_SUCCESS) ++txSuccess_; else ++txFailure_;
     }
     // Nao soltar busy cegamente: um callback tardio seria atribuido ao proximo envio.
-    if (busy_ && elapsed(now, sentAt_, RADIO_CALLBACK_TIMEOUT_MS)) fault_ = true;
+    if (busy_ && elapsed(now, sentAt_, RADIO_CALLBACK_TIMEOUT_MS)) {
+        fault_ = true; faultReason_ = ESP_ERR_TIMEOUT;
+    }
 }
 RadioStats EspNowManager::stats() const {
     return {invalidRx_.load(std::memory_order_relaxed), droppedRx_.load(std::memory_order_relaxed),

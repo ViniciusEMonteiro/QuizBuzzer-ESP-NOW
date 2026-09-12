@@ -20,6 +20,7 @@ public:
     bool receive(QuizMessage& message);
     void poll(uint32_t now);
     bool healthy() const { return !fault_; }
+    esp_err_t faultReason() const { return faultReason_; }
     RadioStats stats() const;
 private:
     static void onReceive(const esp_now_recv_info_t* info, const uint8_t* data, int length);
@@ -32,6 +33,7 @@ private:
     bool initialized_ = false;
     bool busy_ = false;
     bool fault_ = false;
+    esp_err_t faultReason_ = ESP_OK;
     uint32_t sentAt_ = 0;
     uint32_t lastError_ = 0;
     bool backoff_ = false;

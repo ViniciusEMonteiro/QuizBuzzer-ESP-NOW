@@ -47,7 +47,7 @@ void runMaster(EspNowManager& radio, uint64_t bootID) {
     while (true) {
         const uint32_t now = nowMs();
         radio.poll(now);
-        if (!radio.healthy()) halt("Timeout do callback ESP-NOW", ESP_ERR_TIMEOUT);
+        if (!radio.healthy()) halt("Falha persistente ESP-NOW", radio.faultReason());
         const bool reset = buttonEvent(button, now);
         // RESET tem precedencia sobre a fila pendente; pacotes antigos falham no roundID.
         if (reset && !master.newRound()) halt("Contador de rodada esgotado", ESP_ERR_INVALID_STATE);
@@ -65,7 +65,7 @@ void runMaster(EspNowManager& radio, uint64_t bootID) {
             LOG_INFO("[ROUND %u] BUTTON received from SLAVE %02u", master.roundID(), master.winnerID());
             LOG_INFO("[ROUND %u] WINNER: SLAVE %02u; System LOCKED", master.roundID(), master.winnerID());
         }
-        setLedMode(master.acceptButtons() ? LedMode::READY : LedMode::LOCKED);
+        setLedMode(LedManager::modeFor(master.state()));
         for (uint8_t id = 1; id <= MAX_SLAVES; ++id) {
             if (online[id] != master.online(id)) {
                 online[id] = master.online(id);
@@ -85,7 +85,7 @@ void runSlave(EspNowManager& radio, uint8_t id, uint64_t bootID) {
     while (true) {
         const uint32_t now = nowMs();
         radio.poll(now);
-        if (!radio.healthy()) halt("Timeout do callback ESP-NOW", ESP_ERR_TIMEOUT);
+        if (!radio.healthy()) halt("Falha persistente ESP-NOW", radio.faultReason());
         // Primeiro caminho util da iteracao: botao -> esp_now_send.
         if (buttonEvent(button, now)) slave.onButton(now);
         QuizMessage message{};
@@ -94,8 +94,10 @@ void runSlave(EspNowManager& radio, uint8_t id, uint64_t bootID) {
             // Interrompe trabalho secundario se uma nova borda chegou durante RX.
             if (buttonEvent(button, nowMs())) slave.onButton(nowMs());
         }
-        slave.tick(now);
-        setLedMode(LedManager::modeFor(slave.state()));
+        // Uma borda dentro do lote pode ter horario posterior ao inicio da iteracao.
+        // Releia o tempo para nao transformar essa diferenca em timeout por underflow.
+        slave.tick(nowMs());
+        setLedMode(LedManager::modeFor(slave.state(), slave.synchronized()));
         diagnostics(radio, now, lastDiagnostics);
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(APP_POLL_MS));
     }
@@ -118,7 +120,7 @@ void gameTask(void*) {
     LOG_INFO("Boot: %" PRIu64 "; canal ESP-NOW: %u", bootID, WIFI_CHANNEL);
     static EspNowManager radio;
     check(radio.begin(role, id, xTaskGetCurrentTaskHandle()), "Inicializacao ESP-NOW/peers");
-    check(initializeButton(role, xTaskGetCurrentTaskHandle()), "GPIO botao");
+    check(initializeButton(xTaskGetCurrentTaskHandle()), "GPIO botao unico");
     // Somente o controlador correspondente ao jumper e construido/executado.
     if (role == DeviceRole::MASTER) runMaster(radio, bootID);
     else runSlave(radio, id, bootID);

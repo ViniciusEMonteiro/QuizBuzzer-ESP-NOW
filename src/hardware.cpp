@@ -8,17 +8,20 @@
 namespace quiz {
 namespace {
 std::atomic<LedMode> ledMode{LedMode::INITIALIZING};
+TaskHandle_t ledOwner = nullptr;
 std::atomic<bool> buttonEdge{false};
 TaskHandle_t buttonOwner = nullptr;
-gpio_num_t buttonPin = GPIO_NUM_NC;
+constexpr gpio_num_t buttonPin = static_cast<gpio_num_t>(BUTTON_PIN);
 void ledTask(void*) {
     LedManager led;
     while (true) {
         const uint32_t now = nowMs();
         led.setMode(ledMode.load(std::memory_order_relaxed), now);
-        gpio_set_level(static_cast<gpio_num_t>(SLAVE_LED_PIN), led.level(now) == LED_ACTIVE_HIGH);
+        const LedLevels levels = led.levels(now);
+        gpio_set_level(static_cast<gpio_num_t>(SLAVE_LED_PIN), levels.button == LED_ACTIVE_HIGH);
+        gpio_set_level(static_cast<gpio_num_t>(EXTERNAL_LED_PIN), levels.external == EXTERNAL_LED_ACTIVE_HIGH);
         // Espera somente da tarefa de LED; a tarefa do jogo permanece livre.
-        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10));
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(LED_TASK_POLL_MS));
     }
 }
 void buttonISR(void*) {
@@ -40,15 +43,26 @@ esp_err_t inputPullup(int pin) {
 }
 uint32_t nowMs() { return static_cast<uint32_t>(esp_timer_get_time() / 1000); }
 esp_err_t initializeIndicators() {
-    if (!GPIO_IS_VALID_OUTPUT_GPIO(SLAVE_LED_PIN)) return ESP_ERR_INVALID_ARG;
-    gpio_config_t config{};
-    config.pin_bit_mask = 1ULL << SLAVE_LED_PIN;
-    config.mode = GPIO_MODE_OUTPUT;
-    esp_err_t result = gpio_config(&config);
+    if (!GPIO_IS_VALID_OUTPUT_GPIO(SLAVE_LED_PIN) || !GPIO_IS_VALID_OUTPUT_GPIO(EXTERNAL_LED_PIN))
+        return ESP_ERR_INVALID_ARG;
+    // Precarrega ambos apagados antes de habilitar as saidas, inclusive ativo-LOW.
+    // O gate externo tambem exige resistor de pull-down no hardware durante reset.
+    esp_err_t result = gpio_set_level(static_cast<gpio_num_t>(SLAVE_LED_PIN), !LED_ACTIVE_HIGH);
     if (result != ESP_OK) return result;
-    return xTaskCreate(ledTask, "quiz_led", 2048, nullptr, 1, nullptr) == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
+    result = gpio_set_level(static_cast<gpio_num_t>(EXTERNAL_LED_PIN), !EXTERNAL_LED_ACTIVE_HIGH);
+    if (result != ESP_OK) return result;
+    gpio_config_t config{};
+    config.pin_bit_mask = (1ULL << SLAVE_LED_PIN) | (1ULL << EXTERNAL_LED_PIN);
+    config.mode = GPIO_MODE_OUTPUT;
+    result = gpio_config(&config);
+    if (result != ESP_OK) return result;
+    return xTaskCreate(ledTask, "quiz_led", 2048, nullptr, 1, &ledOwner) == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
 }
-void setLedMode(LedMode mode) { ledMode.store(mode, std::memory_order_relaxed); }
+void setLedMode(LedMode mode) {
+    const LedMode previous = ledMode.exchange(mode, std::memory_order_relaxed);
+    // Acorda o LED na troca de estado, sem espera no caminho do jogo.
+    if (previous != mode && ledOwner) xTaskNotifyGive(ledOwner);
+}
 esp_err_t readDeviceRole(DeviceRole& role) {
     const esp_err_t result = inputPullup(ROLE_SELECT_PIN);
     if (result != ESP_OK) return result;
@@ -56,8 +70,8 @@ esp_err_t readDeviceRole(DeviceRole& role) {
     role = gpio_get_level(static_cast<gpio_num_t>(ROLE_SELECT_PIN)) == 0 ? DeviceRole::MASTER : DeviceRole::SLAVE;
     return ESP_OK;
 }
-esp_err_t initializeButton(DeviceRole role, TaskHandle_t owner) {
-    buttonPin = static_cast<gpio_num_t>(role == DeviceRole::MASTER ? MASTER_RESET_BUTTON_PIN : SLAVE_BUTTON_PIN);
+esp_err_t initializeButton(TaskHandle_t owner) {
+    // Mesma entrada nos dois papeis; somente o controlador selecionado interpreta o evento.
     esp_err_t result = inputPullup(buttonPin);
     if (result != ESP_OK) return result;
     buttonOwner = owner;

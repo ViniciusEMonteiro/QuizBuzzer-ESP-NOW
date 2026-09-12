@@ -1,6 +1,6 @@
 # QuizBuzzer ESP-NOW
 
-Firmware **QuizBuzzer-ESP32-ESPNow**, em C++ com **ESP-IDF SDK v6.x**, validado na compilação com **v6.0.2**, para nove bancadas de perguntas e respostas: um MASTER e oito SLAVES. Alvo inicial: ESP32 clássico, módulo ESP32-WROOM-32, flash de 4 MB. Usa CMake e APIs nativas do ESP-IDF.
+Firmware **QuizBuzzer-ESP32-ESPNow**, em C++ com **ESP-IDF SDK v6.x**, validado na compilação com **v6.0.2**, para nove bancadas de perguntas e respostas: um MASTER e oito SLAVES. Cada bancada possui LED no botão e uma saída independente para MOSFET e fita LED de 12 V na caixa de acrílico. Alvo inicial: ESP32 clássico, módulo ESP32-WROOM-32, flash de 4 MB. Usa CMake e APIs nativas do ESP-IDF.
 
 O MASTER aceita o primeiro `BUTTON_PRESSED` válido recebido na rodada, registra o vencedor e trava a disputa antes de qualquer envio ou log. Somente sua confirmação `WINNER` permite ao SLAVE sinalizar vitória. O botão de nova rodada do MASTER limpa o resultado e libera outra disputa.
 
@@ -16,6 +16,8 @@ Todas as placas recebem o mesmo binário. Um jumper lido no boot define a funç�
 | HIGH, aberto com pull-up | SLAVE | 1 a 8, localizado pelo MAC |
 
 `ConfigDeviceIdProvider` consulta a tabela compartilhada de MACs; `CONFIGURED_SLAVE_ID=0` ativa essa seleção automática. A alternativa de ID fixo e a extensão para DIP switch, jumpers ou NVS estão descritas em [configuração](docs/configuracao.md).
+
+Cada placa possui **um único botão**, ligado a `BUTTON_PIN` (GPIO25). O papel selecionado no boot define sua função: responder no SLAVE ou RESET/nova rodada no MASTER. A ligação física é a mesma nos dois modos.
 
 Uma única tarefa `quiz_game` controla o estado da placa. Os callbacks ESP-NOW validam e copiam pacotes para uma fila FIFO, sem alterar a rodada. Uma ISR de GPIO acorda a tarefa do jogo, que detecta a primeira borda e tenta transmitir imediatamente. Debounce, retransmissões e supervisão usam contadores de tempo locais; esses tempos nunca comparam participantes.
 
@@ -37,8 +39,8 @@ tools/run_qemu_tests.py   Executor dos testes em emulação
 1. O MASTER inicia a rodada 1 se `AUTO_ARM_ON_BOOT=true`; caso contrário, aguarda o botão de nova rodada.
 2. Cada SLAVE anuncia seu boot com `STATUS`. O MASTER responde por unicast com o estado atual e o SLAVE confirma com `ACK`.
 3. Após `RESET_ROUND`, o SLAVE fica READY. A primeira borda de seu botão gera um pacote de 42 bytes, sem aguardar os 30 ms do debounce.
-4. O primeiro pacote válido aceito pelo MASTER define o vencedor. Ele envia `WINNER` ao vencedor e `LOCK_ROUND` aos demais.
-5. Novos acionamentos não alteram o resultado. O botão do MASTER incrementa `roundID` e inicia outra rodada.
+4. O primeiro pacote válido aceito pelo MASTER define o vencedor. Ele envia `WINNER` ao vencedor e `LOCK_ROUND` aos demais. O vencedor pisca o botão e a fita externa juntos; os perdedores apagam ambos.
+5. O MASTER apaga sua fita e acende o botão de RESET. Novos acionamentos dos SLAVES não alteram o resultado. Ao pressionar RESET, o MASTER incrementa `roundID`, apaga a luz do botão e acende a fita para indicar rodada aberta.
 
 O participante precisa soltar o botão para voltar a disparar. Um botão mantido durante boot ou mudança de rodada não produz um novo acionamento. O botão do MASTER é uma entrada de jogo; não é o pino EN de reset do ESP32.
 
@@ -62,11 +64,11 @@ flowchart TD
     A[Boot SLAVE] --> B[STATUS: solicitar sincronização]
     B --> C{Estado recebido do MASTER}
     C -->|RESET_ROUND| D[READY / LED contínuo]
-    C -->|LOCK_ROUND| E[LOCKED / pulso de presença]
+    C -->|LOCK_ROUND| E[LOCKED / ambos os LEDs apagados]
     D --> F{Primeira borda do botão?}
     F -->|Sim| G[Transmitir BUTTON imediatamente]
     G --> H[WAITING_MASTER / tentativas limitadas]
-    H -->|WINNER válido| I[WINNER / piscar rápido]
+    H -->|WINNER válido| I[WINNER / botão e fita piscam juntos]
     H -->|LOCK_ROUND| E
     H -->|Timeout| B
     I -->|Nova rodada| D
@@ -89,11 +91,11 @@ A regra é **primeiro pacote válido recebido e aceito**, não o menor tempo fí
 | Sinal | GPIO | Ligação |
 | --- | ---: | --- |
 | `ROLE_SELECT_PIN` | 27 | Pull-up; jumper para GND seleciona MASTER |
-| `SLAVE_BUTTON_PIN` | 25 | Botão normalmente aberto para GND |
-| `SLAVE_LED_PIN` | 26 | Saída ativa em HIGH para estágio de acionamento |
-| `MASTER_RESET_BUTTON_PIN` | 33 | Botão normalmente aberto para GND |
+| `BUTTON_PIN` | 25 | Botão único para GND: resposta no SLAVE / RESET no MASTER |
+| `SLAVE_LED_PIN` | 26 | LED do botão em SLAVE e MASTER |
+| `EXTERNAL_LED_PIN` | 32 | Comando do MOSFET da fita LED de 12 V, em todas as bancadas |
 
-Essa pinagem é provisória e específica do ESP32 clássico. Os GPIOs usam lógica de 3,3 V. LEDs de botões de 5/12 V precisam de estágio de acionamento; consulte [hardware](docs/hardware.md) antes de conectar.
+Essa pinagem é provisória e específica do ESP32 clássico. Os GPIOs usam lógica de 3,3 V; o GPIO32 comanda o gate/driver, e a fonte de 12 V alimenta a fita através do MOSFET. LEDs de botões de 5/12 V também precisam de estágio de acionamento; consulte [hardware](docs/hardware.md) antes de conectar.
 
 ## Obter e configurar os MACs
 
@@ -132,16 +134,27 @@ O código exige a série **6.x** e usa as assinaturas de callback dessa série: 
 
 ## LEDs
 
-| Estado SLAVE | Padrão |
-| --- | --- |
-| Inicialização / sincronização | Alterna a cada 150 ms |
-| READY | Aceso contínuo |
-| WAITING_MASTER | Alterna a cada 300 ms |
-| WINNER | Alterna a cada 100 ms |
-| LOCKED | Pulso de 80 ms a cada 2 s |
-| Erro de inicialização/radio | Dois pulsos curtos a cada 2 s |
+| Estado SLAVE | LED do botão (GPIO26) | Fita externa (GPIO32/MOSFET) |
+| --- | --- | --- |
+| Inicialização do hardware | Alterna a cada 150 ms | Apagada |
+| Aguardando sincronização / conexão perdida | Apagado | Apagada |
+| READY, conectado e liberado | Aceso contínuo | Apagada |
+| WAITING_MASTER, conexão sincronizada | Aceso contínuo enquanto aguarda decisão | Apagada |
+| WINNER | Pisca a cada 100 ms | Pisca junto com o botão, na mesma fase |
+| LOCKED, perdedor ou aguardando liberação | Apagado, sem pulsos | Apagada |
+| Erro de inicialização/rádio | Dois pulsos curtos a cada 2 s | Apagada |
 
-No MASTER, o mesmo LED fica contínuo em ARMED e pulsa quando a rodada está bloqueada ou aguardando liberação. Os padrões são configuráveis. A indicação WINNER permanece até nova rodada, mesmo se houver perda de comunicação.
+O botão aceso indica conexão sincronizada; quando a bancada perde, o bloqueio tem prioridade sobre essa indicação. Sem decisão até o timeout, ou quando a supervisão detecta perda de conexão, ele apaga durante a ressincronização. Uma vitória já confirmada mantém os dois LEDs piscando até nova rodada, mesmo se houver perda de comunicação.
+
+| Estado MASTER | LED do botão RESET | Fita externa |
+| --- | --- | --- |
+| ARMED, aguardando acionamento de SLAVE | Apagado | Acesa contínua |
+| LOCKED, vencedor definido | Aceso, indicando nova rodada | Apagada |
+| Pronto, aguardando liberação manual no boot | Aceso | Apagada |
+
+No MASTER, as saídas têm indicações inversas durante a operação. O boot de hardware e os erros usam os padrões de diagnóstico do botão, com a fita apagada. A luz orienta o operador; pressionar RESET durante ARMED também inicia outra rodada.
+
+Os dois LEDs do vencedor usam um único cálculo de fase, sem temporizadores independentes. Ajuste `WINNER_BLINK_MS` para mudar a velocidade e `LED_ACTIVE_HIGH`/`EXTERNAL_LED_ACTIVE_HIGH` para as polaridades dos dois estágios de acionamento.
 
 ## Protocolo e recuperação
 
@@ -173,7 +186,8 @@ O segundo comando exige o QEMU Xtensa da Espressif no PATH. Alternativamente, ex
 | MASTER registra vencedor, LED demora | WINNER/ACK perdidos; retries mantêm o resultado; verifique o enlace |
 | Botão mantido não dispara novamente | Comportamento intencional: solte por pelo menos 30 ms e aguarde nova rodada |
 | READY demora após RESET | RESET é confirmado por unicast; uma placa offline não bloqueia as demais |
-| LED sempre invertido | Ajuste `LED_ACTIVE_HIGH` conforme transistor/driver |
+| LED sempre invertido | Ajuste `LED_ACTIVE_HIGH` para o botão ou `EXTERNAL_LED_ACTIVE_HIGH` para o MOSFET/driver da fita |
+| Perdedor com LEDs apagados | É a indicação de bloqueio; voltará a ter botão aceso após nova rodada |
 | Erro NVS | Não apague automaticamente; siga manutenção documentada |
 | Timeout de callback do rádio | Firmware entra em erro; revise alimentação/enlace e reinicie a placa |
 | Erro de compilação em callback | Confirme ESP-IDF 6.x e reconfigure com essa instalação |

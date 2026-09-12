@@ -8,7 +8,7 @@ uint32_t nowMs();
 esp_err_t initializeIndicators();
 void setLedMode(LedMode mode);
 esp_err_t readDeviceRole(DeviceRole& role);
-esp_err_t initializeButton(DeviceRole role, TaskHandle_t owner);
+esp_err_t initializeButton(TaskHandle_t owner);
 bool buttonIsPressed();
 bool consumeButtonEdge();
 esp_err_t initializeStorage();
